@@ -1,0 +1,8 @@
+{
+  // Wrangler config to deploy static assets from the Vite `dist` folder
+  "name": "spell-bee-trainer",
+  "compatibility_date": "2026-01-19",
+  "assets": {
+    "directory": "./dist"
+  }
+}
