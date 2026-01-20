@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { FormEvent } from 'react';
 import { 
-  Volume2, Settings, Check, X, ArrowRight, RefreshCw, Trophy, 
+  Volume2, Check, X, ArrowRight, RefreshCw, Trophy, 
   Edit3, Play, FastForward, Mic, MicOff, Square 
 } from 'lucide-react';
 import './index.css';
@@ -113,9 +113,8 @@ export default function App() {
   const [userInput, setUserInput] = useState<string>("");
   const [status, setStatus] = useState<"idle" | "correct" | "incorrect" | "revealed">("idle");
   const [stats, setStats] = useState({ correct: 0, total: 0, streak: 0 });
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [customListText, setCustomListText] = useState(DEFAULT_WORDS.join(", "));
   const [autoAdvance, setAutoAdvance] = useState(true);
+  const [autoListen, setAutoListen] = useState(true);
   const [voice, setVoice] = useState<SpeechSynthesisVoice | null>(null);
   
   // Speech Recognition State
@@ -126,6 +125,12 @@ export default function App() {
   const recognitionRef = useRef<ISpeechRecognition | null>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const checkSpellingRef = useRef<((inputOverride?: string | null) => void) | null>(null);
+  const currentWordRef = useRef<string | null>(null);
+  const manualStopRef = useRef(false);
+  const spelledInputRef = useRef<string>("");
+  const lastDisplayRef = useRef<string>("");
+
+
 
   // Initialize Voices & Speech Recognition
   useEffect(() => {
@@ -164,6 +169,22 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   }, [voice]);
 
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      const isTyping = tag === 'input' || tag === 'textarea' || (target as HTMLElement | null)?.isContentEditable;
+
+      if (event.code === 'Space' && !isTyping) {
+        event.preventDefault();
+        if (currentWord) speak(currentWord);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [currentWord, speak]);
+
   // Speech Recognition Logic
   const startListening = useCallback(() => {
     if (!hasSpeechSupport) return;
@@ -185,23 +206,48 @@ export default function App() {
 
     recognition.onstart = () => {
       setIsListening(true);
+      spelledInputRef.current = "";
+      lastDisplayRef.current = "";
       setUserInput(""); 
     };
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
-      resetSilenceTimer(); 
-      
-      let transcript = '';
+      resetSilenceTimer();
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        transcript += event.results[i][0].transcript;
+        const result = event.results[i];
+        const text = result[0].transcript.trim();
+
+        if (!text) continue;
+
+        if (result.isFinal) {
+          console.log('Final transcript:', text);
+
+          const words = text.split(/\s+/).filter(w => w.length > 0);
+          const MAX_LETTER_LENGTH = 4;
+          const letterTokens = words.filter(word => word.length <= MAX_LETTER_LENGTH);
+          const longWords = words.filter(word => word.length > MAX_LETTER_LENGTH);
+
+          if (longWords.length > 0) {
+            console.log('🚫 Ignoring long words:', longWords.join(', '));
+          }
+
+          if (letterTokens.length === 0) {
+            continue;
+          }
+
+          const append = letterTokens.join('');
+          spelledInputRef.current = spelledInputRef.current
+            ? `${spelledInputRef.current}${append}`
+            : append;
+        }
       }
-      
-      // We also want to accumulate the full session transcript if continuous
-      const fullTranscript = Array.from(event.results)
-        .map((result: any) => result[0].transcript)
-        .join('');
-      
-      setUserInput(fullTranscript);
+
+      const display = spelledInputRef.current;
+      if (display !== lastDisplayRef.current) {
+        lastDisplayRef.current = display;
+        setUserInput(display);
+      }
     };
 
     recognition.onerror = (event: SpeechRecognitionError) => {
@@ -247,18 +293,20 @@ export default function App() {
       setCurrentWord(word);
       setUserInput("");
       setStatus("idle");
+      manualStopRef.current = false;
       stopListening(); 
       
-      speak(word, () => {
+      speak(word);
+      if (autoListen) {
         setTimeout(() => {
-            startListening();
-        }, 150);
-      });
+          startListening();
+        }, 400);
+      }
       
       setTimeout(() => inputRef.current?.focus(), 100);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wordList, speak, startListening, stopListening]);
+  }, [wordList, speak, startListening, stopListening, autoListen]);
 
   // Effect for Auto-Advance
   useEffect(() => {
@@ -266,7 +314,7 @@ export default function App() {
     if (status === 'correct' && autoAdvance) {
       timeoutId = setTimeout(() => {
         handleNewWord();
-      }, 1500); 
+      }, 2500); 
     }
     return () => clearTimeout(timeoutId);
   }, [status, autoAdvance, handleNewWord]);
@@ -298,14 +346,26 @@ export default function App() {
         total: prev.total + 1,
         streak: 0
       }));
-      speak("Incorrect.");
+      speak("Let's try again.");
+      // Reset for retry and auto-restart listening if enabled
+      spelledInputRef.current = "";
+      lastDisplayRef.current = "";
+      setUserInput("");
+      
+      // Only auto-restart if autoListen is on AND user haven't manually stopped the mic for this word
+      if (autoListen && !manualStopRef.current) {
+        setTimeout(() => {
+          startListening();
+        }, 600);
+      }
     }
-  }, [currentWord, status, userInput, speak, stopListening]);
+  }, [currentWord, status, userInput, speak, stopListening, autoListen, startListening]);
 
-  // Keep ref updated
+  // Keep refs updated
   useEffect(() => {
     checkSpellingRef.current = checkSpelling;
-  }, [checkSpelling]);
+    currentWordRef.current = currentWord;
+  }, [checkSpelling, currentWord]);
 
   const resetSilenceTimer = () => {
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
@@ -314,9 +374,24 @@ export default function App() {
       // 3 Seconds of silence AFTER speaking starts -> Submit
       stopListening();
       setTimeout(() => {
+        const hasSpelledInput = spelledInputRef.current.trim().length > 0;
+        if (!hasSpelledInput) {
+          // User never started spelling; do not mark incorrect
+          return;
+        }
         if (checkSpellingRef.current) checkSpellingRef.current();
       }, 100);
     }, 3000);
+  };
+
+  const handleMicToggle = () => {
+    if (isListening) {
+      manualStopRef.current = true;
+      stopListening();
+    } else {
+      manualStopRef.current = false;
+      startListening();
+    }
   };
 
   const handleManualCheck = (e?: FormEvent) => {
@@ -338,26 +413,8 @@ export default function App() {
     if (currentWord) speak(`The word is ${currentWord}`);
   };
 
-  const updateWordList = () => {
-    const newWords = customListText
-      .split(/[\n,]+/)
-      .map(w => w.trim())
-      .filter(w => w.length > 0);
-    
-    if (newWords.length > 0) {
-      setWordList(newWords);
-      setIsSettingsOpen(false);
-      setCurrentWord(null);
-      setStatus("idle");
-      setUserInput("");
-      alert(`List updated with ${newWords.length} words!`);
-    } else {
-      alert("Please enter at least one word.");
-    }
-  };
-
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col items-center p-4 font-sans text-gray-800">
+    <div className="app-root min-h-screen bg-gray-50 flex flex-col items-center p-4 font-sans text-gray-800">
       
       {/* Header & Stats */}
       <div className="w-full max-w-md flex justify-between items-center mb-6 pt-4">
@@ -377,66 +434,12 @@ export default function App() {
               <Trophy size={14} /> Streak: {stats.streak}
             </span>
           </div>
-          <button 
-            onClick={() => setIsSettingsOpen(true)}
-            className="p-2 bg-white rounded-full hover:bg-gray-100 shadow-sm border border-gray-200 transition-colors"
-            title="Edit Word List"
-          >
-            <Settings size={20} className="text-gray-600" />
-          </button>
         </div>
       </div>
 
       {/* Main Game Card */}
-      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100 relative">
+      <div className="app-card w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100 relative">
         
-        {/* Settings Overlay */}
-        {isSettingsOpen && (
-          <div className="absolute inset-0 bg-white z-20 p-6 flex flex-col animate-in fade-in duration-200">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-bold">Edit Word List</h2>
-              <button onClick={() => setIsSettingsOpen(false)} className="text-gray-500 hover:text-gray-700">
-                <X size={24} />
-              </button>
-            </div>
-            
-            <div className="mb-4 flex items-center gap-2 p-3 bg-blue-50 rounded-lg">
-              <input 
-                type="checkbox" 
-                id="autoAdvance" 
-                checked={autoAdvance} 
-                onChange={(e) => setAutoAdvance(e.target.checked)}
-                className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500"
-              />
-              <label htmlFor="autoAdvance" className="text-sm font-medium text-blue-900 cursor-pointer select-none">
-                Auto-advance after correct answer
-              </label>
-            </div>
-
-            <p className="text-sm text-gray-500 mb-2">Separate words with commas or new lines.</p>
-            <textarea
-              className="flex-1 w-full p-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none text-sm font-mono bg-gray-50"
-              value={customListText}
-              onChange={(e) => setCustomListText(e.target.value)}
-              placeholder="apple, banana, cherry..."
-            />
-            <div className="mt-4 flex gap-2">
-              <button 
-                onClick={() => setCustomListText(DEFAULT_WORDS.join(", "))}
-                className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
-              >
-                Reset to Default
-              </button>
-              <button 
-                onClick={updateWordList}
-                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm"
-              >
-                Save List
-              </button>
-            </div>
-          </div>
-        )}
-
         {/* Game Content */}
         {!currentWord ? (
           <div className="p-12 flex flex-col items-center justify-center text-center min-h-[300px]">
@@ -445,7 +448,6 @@ export default function App() {
             </div>
             <h2 className="text-2xl font-bold mb-2">Ready to Practice?</h2>
             <p className="text-gray-500 mb-8">
-              We have {wordList.length} words loaded.<br/>
               <span className="text-xs text-gray-400 mt-2 block">
                 {autoAdvance ? "Auto-advance is ON" : "Auto-advance is OFF"}
               </span>
@@ -460,22 +462,30 @@ export default function App() {
         ) : (
           <div className="p-6 flex flex-col h-full">
             
-            {/* Top Bar for Auto-Advance Indicator */}
-            <div className="flex justify-between items-start">
-               <div className="text-[10px] text-gray-400 font-mono tracking-wider uppercase">
-                  {wordList.length} words loaded
+            {/* Top Bar Indicators */}
+            <div className="flex justify-end items-start">
+               <div className="flex items-center gap-2">
+                 {autoAdvance && (
+                   <div className="flex items-center gap-1 text-[10px] text-blue-500 bg-blue-50 px-2 py-1 rounded-full">
+                     <FastForward size={10} /> Auto-Next
+                   </div>
+                 )}
+                 <label className="flex items-center gap-1 text-[10px] text-gray-500 bg-gray-50 px-2 py-1 rounded-full border border-gray-200">
+                   <input
+                     type="checkbox"
+                     checked={autoListen}
+                     onChange={(e) => setAutoListen(e.target.checked)}
+                     className="w-3 h-3 text-blue-600 rounded"
+                   />
+                   Auto-Listen
+                 </label>
                </div>
-               {autoAdvance && (
-                 <div className="flex items-center gap-1 text-[10px] text-blue-500 bg-blue-50 px-2 py-1 rounded-full">
-                   <FastForward size={10} /> Auto-Next
-                 </div>
-               )}
             </div>
 
             {/* Audio Control */}
             <div className="flex justify-center mb-6 mt-4 relative">
               <button
-                onClick={() => speak(currentWord, () => { setTimeout(startListening, 150); })}
+                onClick={() => currentWord && speak(currentWord)}
                 className="relative group w-24 h-24 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center shadow-lg hover:shadow-xl hover:scale-105 active:scale-95 transition-all cursor-pointer z-10"
                 title="Replay Audio"
               >
@@ -488,7 +498,7 @@ export default function App() {
               {/* Mic Button positioned to the right of the main button */}
               {hasSpeechSupport && (
                 <button
-                  onClick={isListening ? handleManualCheck : startListening}
+                  onClick={handleMicToggle}
                   disabled={status === "correct" || status === "revealed"}
                   className={`absolute right-4 top-1/2 -translate-y-1/2 w-12 h-12 rounded-full flex items-center justify-center shadow-md transition-all
                     ${isListening 
@@ -497,11 +507,21 @@ export default function App() {
                     }
                     disabled:opacity-50 disabled:cursor-not-allowed
                   `}
-                  title={isListening ? "Stop & Check" : "Speak Answer"}
+                  title={isListening ? "Stop Microphone" : "Speak Answer"}
                 >
                   {isListening ? <Square size={16} fill="currentColor" /> : <Mic size={20} />}
                 </button>
               )}
+            </div>
+
+            <div className="flex justify-center mb-4">
+              <button
+                type="button"
+                onClick={() => currentWord && speak(currentWord)}
+                className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded-full hover:bg-blue-100 transition-colors"
+              >
+                Repeat Word
+              </button>
             </div>
 
             {/* Status Feedback */}
@@ -566,7 +586,7 @@ export default function App() {
                     className="col-span-2 py-4 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold text-lg shadow-md transition-all flex items-center justify-center gap-2"
                   >
                     {autoAdvance && status === 'correct' ? (
-                      <>Next Word in 1.5s...</>
+                      <>Nice</>
                     ) : (
                       <>Next Word <ArrowRight size={20} /></>
                     )}
