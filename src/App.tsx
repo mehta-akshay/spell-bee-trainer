@@ -108,12 +108,12 @@ const DEFAULT_WORDS: string[] = [
 
 export default function App() {
   // State
-  const [wordList, setWordList] = useState<string[]>(DEFAULT_WORDS);
+  const [wordList] = useState<string[]>(DEFAULT_WORDS);
   const [currentWord, setCurrentWord] = useState<string | null>(null);
   const [userInput, setUserInput] = useState<string>("");
   const [status, setStatus] = useState<"idle" | "correct" | "incorrect" | "revealed">("idle");
   const [stats, setStats] = useState({ correct: 0, total: 0, streak: 0 });
-  const [autoAdvance, setAutoAdvance] = useState(true);
+  const [autoAdvance] = useState(true);
   const [autoListen, setAutoListen] = useState(true);
   const [voice, setVoice] = useState<SpeechSynthesisVoice | null>(null);
   
