@@ -131,6 +131,8 @@ export default function App() {
   const manualStopRef = useRef(false);
   const spelledInputRef = useRef<string>("");
   const lastDisplayRef = useRef<string>("");
+  const shouldAutoRestartRef = useRef(true);
+  const restartAttemptCountRef = useRef(0);
 
 
 
@@ -257,20 +259,39 @@ export default function App() {
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         setIsListening(false);
         setMicPermissionGranted(false);
+        shouldAutoRestartRef.current = false;
+        manualStopRef.current = true;
+      } else if (event.error === 'no-speech') {
+        // No speech detected - this is normal, allow restart
+        shouldAutoRestartRef.current = true;
+      } else if (event.error === 'aborted') {
+        // User or system aborted - don't auto-restart
+        shouldAutoRestartRef.current = false;
+      } else {
+        // Other errors - allow one retry
+        restartAttemptCountRef.current += 1;
+        if (restartAttemptCountRef.current > 2) {
+          shouldAutoRestartRef.current = false;
+        }
       }
-      // Safari iOS sometimes throws 'no-speech' or 'aborted' - don't treat as fatal
     };
 
     recognition.onend = () => {
       setIsListening(false);
-      // Auto-restart if user didn't manually stop and we're in idle state
-      // This helps with Safari iOS which sometimes stops recognition unexpectedly
-      if (!manualStopRef.current && currentWordRef.current && autoListen) {
+      // Only auto-restart if:
+      // 1. User didn't manually stop
+      // 2. We have a current word
+      // 3. Auto-listen is enabled
+      // 4. We haven't hit errors that prevent restart
+      // 5. Permission was previously granted
+      if (!manualStopRef.current && currentWordRef.current && autoListen && 
+          shouldAutoRestartRef.current && micPermissionGranted && 
+          restartAttemptCountRef.current < 3) {
         setTimeout(() => {
           if (!manualStopRef.current && recognitionRef.current === null) {
             startListening();
           }
-        }, 300);
+        }, 500);
       }
     };
 
@@ -307,6 +328,8 @@ export default function App() {
       setUserInput("");
       setStatus("idle");
       manualStopRef.current = false;
+      shouldAutoRestartRef.current = true;
+      restartAttemptCountRef.current = 0;
       stopListening(); 
       
       speak(word);
@@ -401,9 +424,12 @@ export default function App() {
   const handleMicToggle = () => {
     if (isListening) {
       manualStopRef.current = true;
+      shouldAutoRestartRef.current = false;
       stopListening();
     } else {
       manualStopRef.current = false;
+      shouldAutoRestartRef.current = true;
+      restartAttemptCountRef.current = 0;
       setMicPermissionGranted(true); // User explicitly clicked mic
       startListening();
     }
