@@ -116,10 +116,12 @@ export default function App() {
   const [autoAdvance] = useState(true);
   const [autoListen, setAutoListen] = useState(true);
   const [voice, setVoice] = useState<SpeechSynthesisVoice | null>(null);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   
   // Speech Recognition State
   const [isListening, setIsListening] = useState(false);
   const [hasSpeechSupport, setHasSpeechSupport] = useState(false);
+  const [micPermissionGranted, setMicPermissionGranted] = useState(false);
   
   const inputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<ISpeechRecognition | null>(null);
@@ -137,7 +139,7 @@ export default function App() {
     // Voices
     const loadVoices = () => {
       const availVoices = window.speechSynthesis.getVoices();
-      // Removed unused 'voices' state setter here
+      setVoices(availVoices);
       const preferred = availVoices.find(v => v.name.includes("Google US English")) || 
                         availVoices.find(v => v.lang === "en-US") || 
                         availVoices[0];
@@ -254,11 +256,22 @@ export default function App() {
       console.log("Speech recognition error", event.error);
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         setIsListening(false);
+        setMicPermissionGranted(false);
       }
+      // Safari iOS sometimes throws 'no-speech' or 'aborted' - don't treat as fatal
     };
 
     recognition.onend = () => {
       setIsListening(false);
+      // Auto-restart if user didn't manually stop and we're in idle state
+      // This helps with Safari iOS which sometimes stops recognition unexpectedly
+      if (!manualStopRef.current && currentWordRef.current && autoListen) {
+        setTimeout(() => {
+          if (!manualStopRef.current && recognitionRef.current === null) {
+            startListening();
+          }
+        }, 300);
+      }
     };
 
     recognitionRef.current = recognition;
@@ -297,7 +310,8 @@ export default function App() {
       stopListening(); 
       
       speak(word);
-      if (autoListen) {
+      // Only auto-start mic if user has explicitly granted permission by clicking mic before
+      if (autoListen && micPermissionGranted) {
         setTimeout(() => {
           startListening();
         }, 400);
@@ -306,7 +320,7 @@ export default function App() {
       setTimeout(() => inputRef.current?.focus(), 100);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wordList, speak, startListening, stopListening, autoListen]);
+  }, [wordList, speak, startListening, stopListening, autoListen, micPermissionGranted]);
 
   // Effect for Auto-Advance
   useEffect(() => {
@@ -390,6 +404,7 @@ export default function App() {
       stopListening();
     } else {
       manualStopRef.current = false;
+      setMicPermissionGranted(true); // User explicitly clicked mic
       startListening();
     }
   };
@@ -464,21 +479,39 @@ export default function App() {
             
             {/* Top Bar Indicators */}
             <div className="flex justify-end items-start">
-               <div className="flex items-center gap-2">
-                 {autoAdvance && (
-                   <div className="flex items-center gap-1 text-[10px] text-blue-500 bg-blue-50 px-2 py-1 rounded-full">
-                     <FastForward size={10} /> Auto-Next
-                   </div>
+               <div className="flex flex-col items-end gap-2">
+                 <div className="flex items-center gap-2">
+                   {autoAdvance && (
+                     <div className="flex items-center gap-1 text-[10px] text-blue-500 bg-blue-50 px-2 py-1 rounded-full">
+                       <FastForward size={10} /> Auto-Next
+                     </div>
+                   )}
+                   <label className="flex items-center gap-1 text-[10px] text-gray-500 bg-gray-50 px-2 py-1 rounded-full border border-gray-200">
+                     <input
+                       type="checkbox"
+                       checked={autoListen}
+                       onChange={(e) => setAutoListen(e.target.checked)}
+                       className="w-3 h-3 text-blue-600 rounded"
+                     />
+                     Auto-Listen
+                   </label>
+                 </div>
+                 {voices.length > 1 && (
+                   <select
+                     value={voice ? `${voice.name}|||${voice.lang}` : ""}
+                     onChange={(e) => {
+                       const selected = voices.find(v => `${v.name}|||${v.lang}` === e.target.value);
+                       setVoice(selected || null);
+                     }}
+                     className="text-[10px] text-gray-600 bg-white px-2 py-1 rounded border border-gray-200"
+                   >
+                     {voices.map((v) => (
+                       <option key={`${v.name}|||${v.lang}`} value={`${v.name}|||${v.lang}`}>
+                         {v.name}
+                       </option>
+                     ))}
+                   </select>
                  )}
-                 <label className="flex items-center gap-1 text-[10px] text-gray-500 bg-gray-50 px-2 py-1 rounded-full border border-gray-200">
-                   <input
-                     type="checkbox"
-                     checked={autoListen}
-                     onChange={(e) => setAutoListen(e.target.checked)}
-                     className="w-3 h-3 text-blue-600 rounded"
-                   />
-                   Auto-Listen
-                 </label>
                </div>
             </div>
 
