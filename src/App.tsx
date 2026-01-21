@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { FormEvent } from 'react';
 import { 
-  Volume2, Check, X, ArrowRight, RefreshCw, Trophy, 
+  Volume2, Check, RefreshCw, Trophy, 
   Edit3, Play, FastForward, Mic, MicOff, Square 
 } from 'lucide-react';
 import './index.css';
@@ -117,6 +117,9 @@ export default function App() {
   const [autoListen, setAutoListen] = useState(true);
   const [voice, setVoice] = useState<SpeechSynthesisVoice | null>(null);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [shownWords, setShownWords] = useState<Set<string>>(new Set());
+  const [difficulty, setDifficulty] = useState<'all' | 1 | 2 | 3 | 4 | 5 | 6>('all');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   
   // Speech Recognition State
   const [isListening, setIsListening] = useState(false);
@@ -133,11 +136,23 @@ export default function App() {
   const lastDisplayRef = useRef<string>("");
   const shouldAutoRestartRef = useRef(true);
   const restartAttemptCountRef = useRef(0);
+  const [silenceCountdown, setSilenceCountdown] = useState(0);
+  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
 
 
   // Initialize Voices & Speech Recognition
   useEffect(() => {
+    // Load stats from localStorage
+    const savedStats = localStorage.getItem('spellmaster_stats');
+    if (savedStats) {
+      try {
+        setStats(JSON.parse(savedStats));
+      } catch (e) {
+        console.error('Failed to load stats:', e);
+      }
+    }
+
     // Voices
     const loadVoices = () => {
       const availVoices = window.speechSynthesis.getVoices();
@@ -173,22 +188,6 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   }, [voice]);
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const tag = target?.tagName?.toLowerCase();
-      const isTyping = tag === 'input' || tag === 'textarea' || (target as HTMLElement | null)?.isContentEditable;
-
-      if (event.code === 'Space' && !isTyping) {
-        event.preventDefault();
-        if (currentWord) speak(currentWord);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentWord, speak]);
-
   // Speech Recognition Logic
   const startListening = useCallback(() => {
     if (!hasSpeechSupport) return;
@@ -215,6 +214,16 @@ export default function App() {
       setUserInput(""); 
     };
 
+    const extractLetterTokens = (raw: string) => {
+      const tokens = raw
+        .split(/\s+/)
+        .map(token => token.replace(/[^a-z]/gi, ''))
+        .filter(Boolean);
+      const letterTokens = tokens.filter(token => /^[a-z]$/i.test(token));
+      const longWords = tokens.filter(token => token.length > 1);
+      return { letterTokens, longWords };
+    };
+
     recognition.onresult = (event: SpeechRecognitionEvent) => {
       resetSilenceTimer();
 
@@ -227,13 +236,10 @@ export default function App() {
         if (result.isFinal) {
           console.log('Final transcript:', text);
 
-          const words = text.split(/\s+/).filter(w => w.length > 0);
-          const MAX_LETTER_LENGTH = 4;
-          const letterTokens = words.filter(word => word.length <= MAX_LETTER_LENGTH);
-          const longWords = words.filter(word => word.length > MAX_LETTER_LENGTH);
+          const { letterTokens, longWords } = extractLetterTokens(text);
 
           if (longWords.length > 0) {
-            console.log('🚫 Ignoring long words:', longWords.join(', '));
+            console.log('🚫 Ignoring long words (full words):', longWords.join(', '));
           }
 
           if (letterTokens.length === 0) {
@@ -244,6 +250,18 @@ export default function App() {
           spelledInputRef.current = spelledInputRef.current
             ? `${spelledInputRef.current}${append}`
             : append;
+        } else {
+          // Show interim results only if they look like letter spelling (short tokens)
+          if (text.length > 0) {
+            const { letterTokens, longWords } = extractLetterTokens(text);
+            
+            // Only show interim if it looks like letter spelling, not full words
+            if (letterTokens.length > 0 && longWords.length === 0) {
+              const interim = letterTokens.join('');
+              setUserInput(interim);
+            }
+            // If user is speaking full words, ignore completely - don't update textbox
+          }
         }
       }
 
@@ -256,23 +274,29 @@ export default function App() {
 
     recognition.onerror = (event: SpeechRecognitionError) => {
       console.log("Speech recognition error", event.error);
+      let errorMsg = "Microphone error";
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        errorMsg = "Microphone permission denied";
         setIsListening(false);
         setMicPermissionGranted(false);
         shouldAutoRestartRef.current = false;
         manualStopRef.current = true;
       } else if (event.error === 'no-speech') {
-        // No speech detected - this is normal, allow restart
+        errorMsg = "No speech detected - please try again";
         shouldAutoRestartRef.current = true;
       } else if (event.error === 'aborted') {
-        // User or system aborted - don't auto-restart
         shouldAutoRestartRef.current = false;
+      } else if (event.error === 'network') {
+        errorMsg = "Network error - check internet connection";
       } else {
-        // Other errors - allow one retry
         restartAttemptCountRef.current += 1;
         if (restartAttemptCountRef.current > 2) {
+          errorMsg = "Mic failed repeatedly - click to restart";
           shouldAutoRestartRef.current = false;
         }
+      }
+      if (errorMsg && event.error !== 'aborted') {
+        setErrorMessage(errorMsg);
       }
     };
 
@@ -315,10 +339,67 @@ export default function App() {
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
   }, []);
 
+  const handleRepeatWord = useCallback(() => {
+    if (!currentWord) return;
+    const wasListening = isListening;
+    if (wasListening) stopListening();
+    speak(currentWord, () => {
+      if (wasListening && autoListen && micPermissionGranted && !manualStopRef.current) {
+        startListening();
+      }
+    });
+  }, [currentWord, isListening, stopListening, speak, autoListen, micPermissionGranted, startListening]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      const isTyping = tag === 'input' || tag === 'textarea' || (target as HTMLElement | null)?.isContentEditable;
+
+      if (event.code === 'Space' && !isTyping) {
+        event.preventDefault();
+        handleRepeatWord();
+      }
+      
+      // Enter key to submit
+      if (event.code === 'Enter' && isTyping && tag === 'input') {
+        event.preventDefault();
+        handleManualCheck();
+      }
+      
+      // Escape to stop listening
+      if (event.code === 'Escape' && isListening) {
+        event.preventDefault();
+        manualStopRef.current = true;
+        shouldAutoRestartRef.current = false;
+        stopListening();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleRepeatWord, isListening, stopListening]);
+
+  const getFilteredWordList = () => {
+    if (difficulty === 'all') return wordList;
+    const pageSize = Math.ceil(wordList.length / 6);
+    const start = (difficulty - 1) * pageSize;
+    const end = start + pageSize;
+    return wordList.slice(start, end);
+  };
+
   const getRandomWord = () => {
-    if (wordList.length === 0) return null;
-    const randomIndex = Math.floor(Math.random() * wordList.length);
-    return wordList[randomIndex];
+    const filteredList = getFilteredWordList();
+    const availableWords = filteredList.filter(w => !shownWords.has(w));
+    if (availableWords.length === 0) {
+      // Reset if all words have been shown
+      setShownWords(new Set());
+      return filteredList[Math.floor(Math.random() * filteredList.length)] || null;
+    }
+    const randomIndex = Math.floor(Math.random() * availableWords.length);
+    const word = availableWords[randomIndex];
+    setShownWords(prev => new Set([...prev, word]));
+    return word;
   };
 
   const handleNewWord = useCallback(() => {
@@ -332,13 +413,12 @@ export default function App() {
       restartAttemptCountRef.current = 0;
       stopListening(); 
       
-      speak(word);
-      // Only auto-start mic if user has explicitly granted permission by clicking mic before
-      if (autoListen && micPermissionGranted) {
-        setTimeout(() => {
+      speak(word, () => {
+        // Only auto-start mic if user has explicitly granted permission by clicking mic before
+        if (autoListen && micPermissionGranted && !manualStopRef.current) {
           startListening();
-        }, 400);
-      }
+        }
+      });
       
       setTimeout(() => inputRef.current?.focus(), 100);
     }
@@ -361,14 +441,19 @@ export default function App() {
     if (!currentWord || status === "correct") return;
 
     const textToCheck = inputOverride !== null ? inputOverride : userInput;
-    const normalize = (str: string) => str.replace(/[\s\W_]+/g, '').toLowerCase();
+    // Normalize: lowercase, remove extra spaces, but keep accents and hyphens/apostrophes
+    const normalize = (str: string) => str.toLowerCase().trim().replace(/\s+/g, ' ');
     
     const normInput = normalize(textToCheck);
     const normTarget = normalize(currentWord);
+    // Also try without special chars as fallback for user convenience
+    const stripSpecial = (s: string) => s.replace(/[^a-z0-9\s]/g, '');
+    const stripInput = stripSpecial(normInput);
+    const stripTarget = stripSpecial(normTarget);
 
     stopListening(); // Stop listening once we check
 
-    if (normInput === normTarget) {
+    if (normInput === normTarget || stripInput === stripTarget) {
       setStatus("correct");
       setStats(prev => ({
         correct: prev.correct + 1,
@@ -406,8 +491,21 @@ export default function App() {
 
   const resetSilenceTimer = () => {
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+    setSilenceCountdown(3);
+    
+    countdownIntervalRef.current = setInterval(() => {
+      setSilenceCountdown(prev => {
+        if (prev <= 1) {
+          clearInterval(countdownIntervalRef.current!);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
     
     silenceTimerRef.current = setTimeout(() => {
+      setSilenceCountdown(0);
       // 3 Seconds of silence AFTER speaking starts -> Submit
       stopListening();
       setTimeout(() => {
@@ -457,22 +555,29 @@ export default function App() {
   return (
     <div className="app-root min-h-screen bg-gray-50 flex flex-col items-center p-4 font-sans text-gray-800">
       
+      {/* Error Toast */}
+      {errorMessage && (
+        <div className="fixed top-4 right-4 bg-red-500 text-white px-4 py-2 rounded-lg shadow-lg z-50 animate-pulse">
+          {errorMessage}
+        </div>
+      )}
+      
       {/* Header & Stats */}
-      <div className="w-full max-w-md flex justify-between items-center mb-6 pt-4">
+      <div className="w-full max-w-md flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 sm:mb-6 pt-2 sm:pt-4 gap-3 sm:gap-0">
         <div className="flex items-center gap-2">
           <div className="bg-blue-600 text-white p-2 rounded-lg shadow-sm">
             <Edit3 size={20} />
           </div>
-          <h1 className="text-xl font-bold tracking-tight text-gray-900">SpellMaster</h1>
+          <h1 className="text-lg sm:text-xl font-bold tracking-tight text-gray-900">SpellMaster</h1>
         </div>
         
-        <div className="flex items-center gap-4 text-sm font-medium">
-          <div className="flex flex-col items-end">
-            <span className="text-green-600 flex items-center gap-1">
-              <Check size={14} /> {stats.correct}/{stats.total}
+        <div className="flex items-center gap-6 sm:gap-4 text-xs sm:text-sm font-medium">
+          <div className="flex flex-col items-start sm:items-end">
+            <span className="text-green-600 flex items-center gap-1" aria-label={`Correct: ${stats.correct} out of ${stats.total}`}>
+              <Check size={16} /> {stats.correct}/{stats.total}
             </span>
-            <span className="text-orange-500 flex items-center gap-1">
-              <Trophy size={14} /> Streak: {stats.streak}
+            <span className="text-orange-500 flex items-center gap-1 mt-1" aria-label={`Streak: ${stats.streak}`}>
+              <Trophy size={16} /> Streak: {stats.streak}
             </span>
           </div>
         </div>
@@ -483,83 +588,106 @@ export default function App() {
         
         {/* Game Content */}
         {!currentWord ? (
-          <div className="p-12 flex flex-col items-center justify-center text-center min-h-[300px]">
-            <div className="w-20 h-20 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mb-6 shadow-inner">
-              <Volume2 size={40} />
+          <div className="p-6 sm:p-12 flex flex-col items-center justify-center text-center min-h-[300px]">
+            <div className="w-16 sm:w-20 h-16 sm:h-20 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mb-4 sm:mb-6 shadow-inner">
+              <Volume2 size={32} />
             </div>
-            <h2 className="text-2xl font-bold mb-2">Ready to Practice?</h2>
-            <p className="text-gray-500 mb-8">
+            <h2 className="text-xl sm:text-2xl font-bold mb-2">Ready to Practice?</h2>
+            
+            {/* Difficulty Selector */}
+            <div className="mb-4 sm:mb-6 w-full">
+              <label htmlFor="difficulty" className="block text-xs sm:text-sm font-medium text-gray-600 mb-2">Select Level:</label>
+              <select
+                id="difficulty"
+                value={difficulty}
+                onChange={(e) => {
+                  setDifficulty(e.target.value as any);
+                  setShownWords(new Set());
+                }}
+                className="w-full px-3 py-2 sm:py-2.5 border border-gray-300 rounded-lg text-sm font-medium touch-manipulation"
+              >
+                <option value="all">All (1-6)</option>
+                <option value="1">Page 1 (Easy)</option>
+                <option value="2">Page 2</option>
+                <option value="3">Page 3</option>
+                <option value="4">Page 4</option>
+                <option value="5">Page 5</option>
+                <option value="6">Page 6 (Hard)</option>
+              </select>
+            </div>
+            
+            <p className="text-gray-500 mb-6 sm:mb-8 text-xs sm:text-sm">
               <span className="text-xs text-gray-400 mt-2 block">
                 {autoAdvance ? "Auto-advance is ON" : "Auto-advance is OFF"}
               </span>
             </p>
             <button
               onClick={handleNewWord}
-              className="px-8 py-4 bg-blue-600 text-white rounded-xl font-bold text-lg shadow-lg hover:bg-blue-700 hover:scale-105 transition-all flex items-center gap-2"
+              className="px-6 sm:px-8 py-3 sm:py-4 bg-blue-600 text-white rounded-xl font-bold text-base sm:text-lg shadow-lg hover:bg-blue-700 hover:scale-105 transition-all flex items-center gap-2 touch-manipulation"
+              aria-label="Start quiz"
             >
-              <Play size={20} fill="currentColor" /> Start Quiz
+              <Play size={20} fill="currentColor" /> Start
             </button>
           </div>
         ) : (
-          <div className="p-6 flex flex-col h-full">
+          <div className="p-4 sm:p-6 flex flex-col h-full">
             
-            {/* Top Bar Indicators */}
-            <div className="flex justify-end items-start">
-               <div className="flex flex-col items-end gap-2">
-                 <div className="flex items-center gap-2">
-                   {autoAdvance && (
-                     <div className="flex items-center gap-1 text-[10px] text-blue-500 bg-blue-50 px-2 py-1 rounded-full">
-                       <FastForward size={10} /> Auto-Next
-                     </div>
-                   )}
-                   <label className="flex items-center gap-1 text-[10px] text-gray-500 bg-gray-50 px-2 py-1 rounded-full border border-gray-200">
-                     <input
-                       type="checkbox"
-                       checked={autoListen}
-                       onChange={(e) => setAutoListen(e.target.checked)}
-                       className="w-3 h-3 text-blue-600 rounded"
-                     />
-                     Auto-Listen
-                   </label>
-                 </div>
-                 {voices.length > 1 && (
-                   <select
-                     value={voice ? `${voice.name}|||${voice.lang}` : ""}
-                     onChange={(e) => {
-                       const selected = voices.find(v => `${v.name}|||${v.lang}` === e.target.value);
-                       setVoice(selected || null);
-                     }}
-                     className="text-[10px] text-gray-600 bg-white px-2 py-1 rounded border border-gray-200"
-                   >
-                     {voices.map((v) => (
-                       <option key={`${v.name}|||${v.lang}`} value={`${v.name}|||${v.lang}`}>
-                         {v.name}
-                       </option>
-                     ))}
-                   </select>
-                 )}
-               </div>
+            {/* Top Bar Indicators - Stack on mobile */}
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-start mb-3 gap-2">
+              <div className="flex flex-col gap-2 w-full sm:w-auto">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {autoAdvance && (
+                    <div className="flex items-center gap-1 text-[9px] sm:text-[10px] text-blue-500 bg-blue-50 px-2 py-1 rounded-full whitespace-nowrap">
+                      <FastForward size={10} /> Auto-Next
+                    </div>
+                  )}
+                  <label className="flex items-center gap-1 text-[9px] sm:text-[10px] text-gray-500 bg-gray-50 px-2 py-1 rounded-full border border-gray-200 whitespace-nowrap touch-manipulation">
+                    <input
+                      type="checkbox"
+                      checked={autoListen}
+                      onChange={(e) => setAutoListen(e.target.checked)}
+                      className="w-3 h-3 text-blue-600 rounded cursor-pointer"
+                    />
+                    Auto-Listen
+                  </label>
+                </div>
+                {voices.length > 1 && (
+                  <select
+                    value={voice ? `${voice.name}|||${voice.lang}` : ""}
+                    onChange={(e) => {
+                      const selected = voices.find(v => `${v.name}|||${v.lang}` === e.target.value);
+                      setVoice(selected || null);
+                    }}
+                    className="text-[9px] sm:text-[10px] text-gray-600 bg-white px-2 py-1 rounded border border-gray-200 font-medium touch-manipulation"
+                    aria-label="Select voice"
+                  >
+                    {voices.map((v) => (
+                      <option key={`${v.name}|||${v.lang}`} value={`${v.name}|||${v.lang}`}>
+                        {v.name.split(/\s+/).slice(0, 2).join(' ')}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
             </div>
 
             {/* Audio Control */}
-            <div className="flex justify-center mb-6 mt-4 relative">
+            <div className="flex flex-col sm:flex-row justify-center items-center mb-4 sm:mb-6 mt-2 sm:mt-4 gap-4">
               <button
-                onClick={() => currentWord && speak(currentWord)}
-                className="relative group w-24 h-24 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center shadow-lg hover:shadow-xl hover:scale-105 active:scale-95 transition-all cursor-pointer z-10"
+                onClick={handleRepeatWord}
+                className="relative group w-20 h-20 sm:w-24 sm:h-24 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center shadow-lg hover:shadow-xl active:scale-95 transition-all cursor-pointer touch-manipulation"
                 title="Replay Audio"
+                aria-label="Replay word"
               >
-                <Volume2 size={40} className="text-white" />
-                <span className="absolute -bottom-8 text-xs font-medium text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                  Replay Word
-                </span>
+                <Volume2 size={36} className="text-white" />
               </button>
               
-              {/* Mic Button positioned to the right of the main button */}
+              {/* Mic Button */}
               {hasSpeechSupport && (
                 <button
                   onClick={handleMicToggle}
                   disabled={status === "correct" || status === "revealed"}
-                  className={`absolute right-4 top-1/2 -translate-y-1/2 w-12 h-12 rounded-full flex items-center justify-center shadow-md transition-all
+                  className={`w-16 h-16 sm:w-12 sm:h-12 rounded-full flex items-center justify-center shadow-md transition-all touch-manipulation
                     ${isListening 
                       ? "bg-red-500 text-white animate-pulse ring-4 ring-red-100" 
                       : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
@@ -567,43 +695,50 @@ export default function App() {
                     disabled:opacity-50 disabled:cursor-not-allowed
                   `}
                   title={isListening ? "Stop Microphone" : "Speak Answer"}
+                  aria-label={isListening ? "Stop microphone" : "Start microphone"}
                 >
-                  {isListening ? <Square size={16} fill="currentColor" /> : <Mic size={20} />}
+                  {isListening ? <Square size={24} fill="currentColor" /> : <Mic size={24} />}
                 </button>
               )}
             </div>
 
-            <div className="flex justify-center mb-4">
+            <div className="flex justify-center mb-3 sm:mb-4">
               <button
                 type="button"
-                onClick={() => currentWord && speak(currentWord)}
-                className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded-full hover:bg-blue-100 transition-colors"
+                onClick={handleRepeatWord}
+                className="px-4 py-2 text-xs sm:text-sm font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded-full hover:bg-blue-100 transition-colors touch-manipulation"
+                aria-label="Repeat word"
               >
-                Repeat Word
+                Repeat
               </button>
             </div>
 
             {/* Status Feedback */}
-            <div className="h-8 mb-2 flex justify-center items-center">
+            <div className="min-h-[48px] sm:min-h-[56px] mb-2 flex flex-col justify-center items-center gap-1">
               {isListening ? (
-                 <span className="text-blue-600 font-semibold flex items-center gap-2 animate-pulse text-sm">
-                   Listening... {userInput ? "(Speak to reset timer)" : "(Thinking...)"}
-                 </span>
+                <>
+                   <span className="text-blue-600 font-semibold flex items-center gap-2 animate-pulse text-xs sm:text-sm" role="status" aria-live="polite">
+                     Listening... {userInput ? "(Speaking)" : "(Waiting)"}
+                   </span>
+                   {silenceCountdown > 0 && (
+                     <span className="text-xs text-blue-500 font-medium">Submit in {silenceCountdown}s</span>
+                   )}
+                </>
               ) : (
                 <>
                   {status === "correct" && (
-                    <span className="text-green-600 font-bold flex items-center gap-2 animate-bounce">
-                      <Check size={20} /> Correct!
+                    <span className="text-green-600 font-bold flex items-center gap-1 sm:gap-2 animate-bounce text-sm sm:text-base" role="status" aria-live="assertive">
+                      ✓ Correct!
                     </span>
                   )}
                   {status === "incorrect" && (
-                    <span className="text-red-500 font-bold flex items-center gap-2 animate-pulse">
-                      <X size={20} /> Incorrect, try again
+                    <span className="text-red-500 font-bold flex items-center gap-1 sm:gap-2 animate-pulse text-sm sm:text-base" role="status" aria-live="assertive">
+                      ✗ Try again
                     </span>
                   )}
                   {status === "revealed" && (
-                    <span className="text-yellow-600 font-bold flex items-center gap-2">
-                       The word is: {currentWord}
+                    <span className="text-yellow-600 font-bold text-sm sm:text-base" role="status" aria-live="assertive">
+                       Word: {currentWord}
                     </span>
                   )}
                 </>
@@ -611,15 +746,15 @@ export default function App() {
             </div>
 
             {/* Input Area */}
-            <form onSubmit={handleManualCheck} className="flex flex-col gap-4">
+            <form onSubmit={handleManualCheck} className="flex flex-col gap-3 sm:gap-4">
               <input
                 ref={inputRef}
                 type="text"
                 value={userInput}
                 onChange={(e) => setUserInput(e.target.value)}
-                placeholder={isListening ? "Listening..." : "Type what you hear..."}
+                placeholder={isListening ? "Listening..." : "Type or speak..."}
                 disabled={status === "correct" || status === "revealed"}
-                className={`w-full text-center text-2xl p-4 border-2 rounded-xl focus:outline-none transition-all placeholder:text-gray-300
+                className={`w-full text-center text-xl sm:text-2xl p-3 sm:p-4 border-2 rounded-xl focus:outline-none transition-all placeholder:text-gray-300 touch-manipulation
                   ${status === "correct" 
                     ? "border-green-500 bg-green-50 text-green-700" 
                     : status === "incorrect" 
@@ -633,22 +768,20 @@ export default function App() {
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck="false"
+                aria-label="Spelling input"
               />
 
               {/* Action Buttons */}
-              <div className="grid grid-cols-2 gap-3 mt-2">
+              <div className="grid grid-cols-2 gap-2 sm:gap-3 mt-1 sm:mt-2">
                 {(status === "correct" || status === "revealed") ? (
                   <button
                     type="button"
                     onClick={handleNewWord}
                     autoFocus
-                    className="col-span-2 py-4 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold text-lg shadow-md transition-all flex items-center justify-center gap-2"
+                    className="col-span-2 py-3 sm:py-4 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold text-sm sm:text-lg shadow-md transition-all touch-manipulation"
+                    aria-label="Next word"
                   >
-                    {autoAdvance && status === 'correct' ? (
-                      <>Nice</>
-                    ) : (
-                      <>Next Word <ArrowRight size={20} /></>
-                    )}
+                    {autoAdvance && status === 'correct' ? 'Next' : 'Next Word'}
                   </button>
                 ) : (
                   <>
@@ -656,45 +789,50 @@ export default function App() {
                       type="button"
                       onClick={handleReveal}
                       disabled={isListening}
-                      className="py-3 bg-gray-100 text-gray-600 hover:bg-gray-200 rounded-xl font-semibold transition-colors disabled:opacity-50"
+                      className="py-3 bg-gray-100 text-gray-600 hover:bg-gray-200 rounded-xl font-semibold transition-colors disabled:opacity-50 touch-manipulation text-sm sm:text-base"
+                      aria-label="Give up"
                     >
-                      I Give Up
+                      Give Up
                     </button>
                     <button
                       type="submit"
                       disabled={(!userInput && !isListening)}
-                      className={`py-3 text-white rounded-xl font-bold shadow-md transition-all
+                      className={`py-3 text-white rounded-xl font-bold shadow-md transition-all touch-manipulation text-sm sm:text-base
                         ${isListening 
                           ? "bg-red-500 hover:bg-red-600" 
                           : "bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                         }
                       `}
+                      aria-label={isListening ? "Stop and check" : "Check spelling"}
                     >
-                      {isListening ? "Stop & Check" : "Check Spelling"}
+                      {isListening ? "Stop" : "Check"}
                     </button>
                   </>
                 )}
               </div>
             </form>
 
-            <div className="mt-6 text-center">
+            <div className="mt-4 sm:mt-6 text-center">
                <button 
                  onClick={handleNewWord} 
-                 className="text-xs text-gray-400 hover:text-blue-500 flex items-center justify-center gap-1 mx-auto transition-colors"
+                 className="text-xs text-gray-400 hover:text-blue-500 flex items-center justify-center gap-1 mx-auto transition-colors touch-manipulation"
+                 aria-label="Skip to new word"
                 >
-                 <RefreshCw size={12} /> Skip to new word
+                 <RefreshCw size={12} /> Skip
                </button>
             </div>
           </div>
         )}
       </div>
 
-      <div className="mt-8 text-center text-gray-400 text-xs max-w-xs">
-        <div className="flex items-center justify-center gap-2 mb-1">
-          {hasSpeechSupport ? <Mic size={12} /> : <MicOff size={12} />}
-          <span>{hasSpeechSupport ? "Voice input supported (Chrome/Safari)" : "Voice input not supported in this browser"}</span>
+      <div className="mt-6 sm:mt-8 text-center text-gray-600 text-xs sm:text-sm max-w-xs space-y-1">
+        <div className="flex items-center justify-center gap-2">
+          {hasSpeechSupport ? <Mic size={14} className="text-green-600" /> : <MicOff size={14} className="text-red-600" />}
+          <span>{hasSpeechSupport ? "✓ Voice OK" : "✗ No voice"}</span>
         </div>
-        Make sure your volume is up.
+        <div className="text-xs text-gray-500">
+          <p>💡 Enter to submit • Esc to stop</p>
+        </div>
       </div>
     </div>
   );
