@@ -120,6 +120,8 @@ export default function App() {
   const [shownWords, setShownWords] = useState<Set<string>>(new Set());
   const [difficulty, setDifficulty] = useState<'all' | 1 | 2 | 3 | 4 | 5 | 6>('all');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [wrongAttempts, setWrongAttempts] = useState(0);
+  const [showHint, setShowHint] = useState(false);
   
   // Speech Recognition State
   const [isListening, setIsListening] = useState(false);
@@ -408,6 +410,8 @@ export default function App() {
       setCurrentWord(word);
       setUserInput("");
       setStatus("idle");
+      setWrongAttempts(0);
+      setShowHint(false);
       manualStopRef.current = false;
       shouldAutoRestartRef.current = true;
       restartAttemptCountRef.current = 0;
@@ -463,6 +467,7 @@ export default function App() {
       speak("Correct! " + currentWord);
     } else {
       setStatus("incorrect");
+      setWrongAttempts(prev => prev + 1);
       setStats(prev => ({
         ...prev,
         total: prev.total + 1,
@@ -712,6 +717,28 @@ export default function App() {
                 Repeat
               </button>
             </div>
+
+            {/* Hint Section */}
+            {wrongAttempts >= 1 && !showHint && status !== "correct" && status !== "revealed" && (
+              <div className="mb-3 text-center">
+                <button
+                  onClick={() => setShowHint(true)}
+                  className="px-4 py-2 text-sm font-medium text-purple-600 bg-purple-50 border border-purple-200 rounded-full hover:bg-purple-100 transition-colors touch-manipulation"
+                  aria-label="Show hint"
+                >
+                  💡 Show Hint
+                </button>
+              </div>
+            )}
+            {showHint && currentWord && status !== "correct" && status !== "revealed" && (
+              <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                <p className="text-xs text-yellow-700 font-medium mb-1">Hint:</p>
+                <p className="text-lg font-mono tracking-wider text-yellow-900">
+                  {currentWord.slice(0, Math.ceil(currentWord.length / 2))}
+                  <span className="text-yellow-400">{"_".repeat(Math.floor(currentWord.length / 2))}</span>
+                </p>
+              </div>
+            )}
 
             {/* Status Feedback */}
             <div className="min-h-[48px] sm:min-h-[56px] mb-2 flex flex-col justify-center items-center gap-1">
